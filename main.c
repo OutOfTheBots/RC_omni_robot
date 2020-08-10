@@ -31,37 +31,23 @@ char LSB, MSB;
 #define init_speed 25000 //this sets the acceleration by setting the timing of first step, the smaller the number the faster the acceleration
 #define SPR 3200 //steps per revolution of the stepper motor
 
-uint32_t  *motor_en[3]; //pointer used to enable/disable motor timers
-uint32_t  *motor_ARR[3]; //pointer used to update ARR for motor timers
-uint32_t  *motor_ODR[3]; //pointer used to switch dir pin
-uint32_t dir_pin[3]; //dir pin number to write to the ODR
+uint32_t  *motor_en[3] = {&TIM3->CR1, &TIM4->CR1, &TIM5->CR1}; //pointers used to enable/disable motor timers
+uint32_t  *motor_ARR[3] = {&TIM3->ARR, &TIM4->ARR, &TIM5->ARR}; //pointer used to update ARR for motor timers
+uint32_t  *motor_ODR[3] = {&GPIOA->ODR, &GPIOD->ODR, &GPIOA->ODR}; //pointers used to switch dir pin
+uint32_t dir_pin[3] = {GPIO_ODR_OD5, GPIO_ODR_OD11, GPIO_ODR_OD2}; //dir pin number to write to the ODR
 
 uint32_t freq_motor_counter; //the freq of the timer calculated from freq_source and prescaler
 
 float tick_freq[3]; //the freq that the steps need to be calculated from frq_counter RPM and SPR
-float speed[3]; //the current speed measured by timer ticks in ARR value to count up to
+float speed[3] = {init_speed, init_speed, init_speed} ; //the current speed measured by timer ticks in ARR value to count up to
 float target_speed[3]; //the target speed that speed is accelerating towards
 
 int32_t n[3];
-int8_t curret_dir[3], target_dir[3], RPM_zero[3];
+int8_t curret_dir[3] = {1, 1, 1};
+int8_t target_dir[3] = {1, 1, 1};
+int8_t RPM_zero[3];
 //------------------------------------------------------------------------------------------
 
-//-----------------------------------------------------------------------------------------
-//following constants and variables are used for the odometer
-
-#define wheel_dai 100 //diameter of the wheel
-#define wheel_base 280 //diameter of the base of the wheels
-#define prescaler_odometer 8399 //freq_odometer_counter = input_clock / (PSC + 1) so will have timer freq of 10KHz
-#define odometer_ARR 10 //ARR value used to generate the odometer freq
-
-uint32_t freq_odometer_counter; //the freq of the odometer timer calculated from freq_source and prescaler
-
-uint16_t last_motor0_speed, last_motor1_speed, last_motor2_speed;
-uint16_t current_motor0_speed, current_motor1_speed, current_motor2_speed;
-uint16_t average_motor0_speed, average_motor1_speed, average_motor2_speed;
-double last_heading, current_heading, average_heading;
-double x_pos, y_pos, odometer_constant;
-//--------------------------------------------------------------------------------------
 
 //--------------------------------------------------------------------------------
 //following variables are used for motion kinematics
@@ -87,30 +73,19 @@ void move_robot (float x, float y, float w); //kinematic movement of robot
 
 
 
-void odometer_setup(void){
-
-	//calculate needed odometer variables
-	freq_odometer_counter = freq_source / (prescaler_odometer + 1);  //calculate the odometer freq
-	odometer_constant = wheel_dai * M_PI * SPR * freq_odometer_counter / freq_motor_counter;
-
-}
-
-void TIM2_IRQHandler(void){
-
-	TIM2->SR &= ~TIM_SR_UIF; // clear UIF flag
-
-	//get current speed in timer ticks
-	current_motor0_speed = TIM3->ARR;
-	current_motor1_speed = TIM4->ARR;
-	current_motor2_speed = TIM5->ARR;
-
-	//calculate average speed
-	average_motor0_speed = (current_motor0_speed + last_motor0_speed) / 2;
-	average_motor0_speed = (current_motor0_speed + last_motor0_speed) / 2;
-	average_motor0_speed = (current_motor0_speed + last_motor0_speed) / 2;
 
 
+void print_float(float float_value){
+	char *tmpSign = (float_value < 0) ? "-" : "";
+	float tmpVal = (float_value < 0) ? -float_value : float_value;
 
+	int tmpInt1 = tmpVal;                  // Get the integer
+	float tmpFrac = tmpVal - tmpInt1;      // Get fraction
+	int tmpInt2 = trunc(tmpFrac * 10000);  // Turn into integer
+
+	// Print as parts, note that you need 0-padding for fractional bit.
+
+	printf ("%s%d.%04d\r\n", tmpSign, tmpInt1, tmpInt2);
 }
 
 
@@ -131,10 +106,10 @@ int main(void){
   pin_setup();
   timer_setup();
   motor_setup();
-  odometer_setup();
   motion_setup();
 
-  int x_stick, y_stick, throttle_stick, yaw_stick;
+  int x_stick, y_stick, throttle_stick, yaw_stick, ch_5, ch_6;
+
 
   printf("Start up\r\n");
 
@@ -142,9 +117,9 @@ int main(void){
 
   while (1){
 
-	  //printf("counter = %d\r\n", odometer_counter);
-	  //HAL_Delay(1000);
 
+	  //print_float(x_pos);
+	  //printf("%d\r\n", motor_pos[2]);
 
 
 	  current_pos = DMA_pos;
@@ -287,13 +262,75 @@ int main(void){
 		  yaw_stick -= 1500;
 
 
-		  //printf("%d\r\n", y_stick);
-		   move_robot(x_stick * 0.7, y_stick * 0.7, yaw_stick * -0.7 );
-		  //set_speed(1,y_stick);
+		  //wait for next byte to be avaiable
+		  while(current_pos==DMA_pos){
+			   HAL_Delay(1);
+		  }
+		  current_pos++;
+		  if (current_pos == 3200){
+			  current_pos = 0;
+		  }
 
+		  //get LSB
+		  LSB = content[current_pos];
+
+		  //wait for next byte to be avaiable
+		  while(current_pos==DMA_pos){
+			   HAL_Delay(1);
+		  }
+		  current_pos++;
+		  if (current_pos == 3200){
+			   current_pos = 0;
+		  }
+
+		  //get MSB
+		  MSB = content[current_pos];
+
+		  //combine bytes then translate and translate
+		  ch_5 = (LSB | (MSB << 8));
+
+
+
+
+		  //wait for next byte to be avaiable
+		  while(current_pos==DMA_pos){
+			   HAL_Delay(1);
+		  }
+		  current_pos++;
+		  if (current_pos == 3200){
+			   current_pos = 0;
+		  }
+
+		  //get LSB
+		  LSB = content[current_pos];
+
+		  //wait for next byte to be avaiable
+		  while(current_pos==DMA_pos){
+			   HAL_Delay(1);
+		  }
+		  current_pos++;
+		  if (current_pos == 3200){
+			   current_pos = 0;
+		  }
+
+		  //get MSB
+		  MSB = content[current_pos];
+
+		  //combine bytes then translate and translate
+		  ch_6 = (LSB | (MSB << 8));
+
+
+
+
+		  if(ch_5==1000)disable_steppers();
+		  else enable_steppers();
+
+		  move_robot(x_stick * 0.7, y_stick * 0.7, yaw_stick * -0.7 );
+		  //set_speed(2,yaw_stick/10);
+
+		  //printf("%d  %d  %d\r\n", yaw_stick, ch_5, ch_6);
 
 	  }
-
 
 
 
@@ -334,15 +371,7 @@ void timer_setup(void){
 	//setup all 4 timers
 
 	//enable the 4 clocks
-	RCC->APB1ENR |= RCC_APB1ENR_TIM2EN | RCC_APB1ENR_TIM3EN |RCC_APB1ENR_TIM4EN | RCC_APB1ENR_TIM5EN;
-
-	//timer2 is used for the odometer
-	TIM2->CR1 &= ~TIM_CR1_CEN; //disable channel 1.
-	TIM2->PSC = prescaler_odometer;   //timer_freq = imput_clock / (PSC + 1) so will have timer freq of 10KHz
-	TIM2->CCMR1 = (TIM2->CCMR1 & ~(0b111<<4)) | (0b110<<4); //set PWM mode 110
-	TIM2->ARR = odometer_ARR; //interupt freq = timer_feq / ARR so will have a interupt freq of 1KHz
-	TIM2->DIER |= TIM_DIER_UIE; //enable interupt
-	NVIC_EnableIRQ(TIM2_IRQn); // Enable interrupt(NVIC level)
+	RCC->APB1ENR |= RCC_APB1ENR_TIM3EN |RCC_APB1ENR_TIM4EN | RCC_APB1ENR_TIM5EN;
 
 	//timer 3 is used for motor 0
 	TIM3->CR1 &= ~TIM_CR1_CEN; //disable channel 1.
@@ -354,6 +383,7 @@ void timer_setup(void){
 	TIM3->CR1 |= TIM_CR1_ARPE; //buffer ARR
 	TIM3->DIER |= TIM_DIER_UIE; //enable interupt
 	NVIC_EnableIRQ(TIM3_IRQn); // Enable interrupt(NVIC level)
+	NVIC_SetPriority 	(TIM3_IRQn, 0);
 
 	//timer 4 is used for motor 1
 	TIM4->CR1 &= ~TIM_CR1_CEN; //disable channel 1.
@@ -365,6 +395,7 @@ void timer_setup(void){
 	TIM4->CR1 |= TIM_CR1_ARPE; //buffer ARR
 	TIM4->DIER |= TIM_DIER_UIE; //enable interupt
 	NVIC_EnableIRQ(TIM4_IRQn); // Enable interrupt(NVIC level)
+	NVIC_SetPriority 	(TIM4_IRQn, 0);
 
 	//timer 5 is used for motor 2
 	TIM5->CR1 &= ~TIM_CR1_CEN; //disable channel 1.
@@ -376,6 +407,7 @@ void timer_setup(void){
 	TIM5->CR1 |= TIM_CR1_ARPE; //buffer ARR
 	TIM5->DIER |= TIM_DIER_UIE; //enable interupt
 	NVIC_EnableIRQ(TIM5_IRQn); // Enable interrupt(NVIC level)
+	NVIC_SetPriority 	(TIM5_IRQn, 0);
 }
 
 
@@ -385,37 +417,12 @@ void motor_setup(void){
 
 	freq_motor_counter = freq_source / (prescaler_motor + 1); //calculate the motor timer freq
 
-	motor_en[0] = &TIM3->CR1;
-	motor_en[1] = &TIM4->CR1;
-	motor_en[2] = &TIM5->CR1;
 
-	motor_ARR[0] = &TIM3->ARR;
-	motor_ARR[1] = &TIM4->ARR;
-	motor_ARR[2] = &TIM5->ARR;
 
-	motor_ODR[0] = &GPIOA->ODR;
-	motor_ODR[1] = &GPIOD->ODR;
-	motor_ODR[2] = &GPIOA->ODR;
 
-	dir_pin[0] = GPIO_ODR_OD5;
-	dir_pin[1] = GPIO_ODR_OD11;
-	dir_pin[2] = GPIO_ODR_OD2;
 
-	speed[0] = init_speed;
-	speed[1] = init_speed;
-	speed[2] = init_speed;
 
-	RPM_zero[0] = 1;
-	RPM_zero[1] = 1;
-	RPM_zero[2] = 1;
 
-	curret_dir[0] = 1;
-	curret_dir[1] = 1;
-	curret_dir[2] = 1;
-
-	target_dir[0] =1;
-	target_dir[1] =1;
-	target_dir[2] =1;
 }
 
 
@@ -482,7 +489,6 @@ void set_speed(uint8_t motor_num, float RPM){
 		RPM_zero[motor_num] = 1;
 		target_speed[motor_num] = init_speed;
 	}else{
-		printf("RPM = %d   ", (int32_t)RPM);
 		RPM_zero[motor_num] = 0;
 		if(RPM>0)target_dir[motor_num] = 1;
 		else{
@@ -568,6 +574,7 @@ void motor_update(uint8_t motor_num){
 void TIM3_IRQHandler(void){
 
 	TIM3->SR &= ~TIM_SR_UIF; // clear UIF flag
+
 	motor_update(0);
 	}
 
@@ -580,7 +587,8 @@ void TIM4_IRQHandler(void){
 void TIM5_IRQHandler(void){
 
 	TIM5->SR &= ~TIM_SR_UIF; // clear UIF flag
-	motor_update(2);
+
+	motor_update(2); //This fuction calculates the next needed value for the ARR and switches the dir pin if needed
 }
 
 
