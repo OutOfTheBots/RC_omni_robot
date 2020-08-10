@@ -12,217 +12,100 @@ static void MX_DMA_Init(void);
 static void MX_USART1_UART_Init(void);
 static void MX_USART3_UART_Init(void);
 
+//--------------------------------------------------------------------
+//following variables are used for RC receiver
+
 char content[3200];
 uint16_t DMA_pos, current_pos;
 char LSB, MSB;
+//------------------------------------------------------------------------
 
-#define freq_source 84000000 //internal clock source freq
 
-uint16_t prescaler = 40; //prescaler used by timer
-uint32_t freq_counter; //the freq of the timer calculated from freq_source and prescaler
-uint16_t init_speed = 25000; //this sets the acceleration by setting the timing of first step, the smaller the number the faster the acceleration
-uint16_t SPR = 3200; //steps per revolution of the stepper motor
+#define freq_source 84000000 //internal clock source freq for all timers
+
+
+//--------------------------------------------------------------------------------------
+//following constants and variables are used for generating step pulse train
+
+#define prescaler_motor 40 //prescaler used by step timers
+#define init_speed 25000 //this sets the acceleration by setting the timing of first step, the smaller the number the faster the acceleration
+#define SPR 3200 //steps per revolution of the stepper motor
+
+uint32_t freq_motor_counter; //the freq of the timer calculated from freq_source and prescaler
+
 float tick_freq[3]; //the freq that the steps need to be calculated from frq_counter RPM and SPR
 float speed[3]; //the current speed measured by timer ticks in ARR value to count up to
 float target_speed[3]; //the target speed that speed is accelerating towards
 
 int32_t n[3];
 int8_t curret_dir[3], target_dir[3], RPM_zero[3];
+//------------------------------------------------------------------------------------------
+
+//-----------------------------------------------------------------------------------------
+//following constants and variables are used for the odometer
+
+#define wheel_dai 100 //diameter of the wheel
+#define wheel_base 280 //diameter of the base of the wheels
+#define prescaler_odometer 8399 //freq_odometer_counter = input_clock / (PSC + 1) so will have timer freq of 10KHz
+#define odometer_ARR 10 //ARR value used to generate the odometer freq
+
+uint32_t freq_odometer_counter; //the freq of the odometer timer calculated from freq_source and prescaler
+
+uint16_t last_motor0_speed, last_motor1_speed, last_motor2_speed;
+uint16_t current_motor0_speed, current_motor1_speed, current_motor2_speed;
+uint16_t average_motor0_speed, average_motor1_speed, average_motor2_speed;
+double last_heading, current_heading, average_heading;
+double x_pos, y_pos, odometer_constant;
+//--------------------------------------------------------------------------------------
+
+//--------------------------------------------------------------------------------
+//following variables are used for motion kinematics
 
 float alpha1, alpha2, alpha3; //the angles of force from motors
 float a, b, c, d, e, f, g, h, i;//the input matrix
 float det, a2, b2, c2, d2, e2,f2, g2, h2, i2;// the inverse matrix
-float x_speed, y_speed, w_speed; //desired speeds in 3 DOF
+//--------------------------------------------------------------------------------
 
 
-void stepper_setup(void){
+void pin_setup(void);
+void timer_setup(void);
+void motor_setup(void);
+void motion_setup();
 
-	freq_counter = freq_source / (prescaler + 1); //calculate the timer freq
-
-	RCC->AHB1ENR |= RCC_AHB1ENR_GPIOAEN | RCC_AHB1ENR_GPIODEN; //enable port A and port D clock
-
-	//setup timer pins
-	GPIOA->MODER |= GPIO_MODER_MODE0_1 | GPIO_MODER_MODE6_1; //setup pin A0 and pin A6 to AF
-	GPIOD->MODER |= GPIO_MODER_MODER12_1; //setup pin D12 to AF mode
-	GPIOA->AFR[0] = (GPIOD->AFR[1] &  ~(0b1111 | (0b1111<<(6*4)))) | 0b0010 | (0b0010<<(6*4)); //set pin A0 and pin A6 to AF timer mode       ;
-	GPIOD->AFR[1] = (GPIOD->AFR[1] & ~(0b1111<<(4*(12-8)))) | 0b0010<<(4*(12-8)); //set pin D12 to AF timer mode
-
-	//setup direction and enable pins
-	GPIOA->MODER |= GPIO_MODER_MODE1_0 | GPIO_MODER_MODE2_0 |  GPIO_MODER_MODE4_0 | GPIO_MODER_MODE5_0;
-	GPIOD->MODER |= GPIO_MODER_MODE10_0 | GPIO_MODER_MODE11_0;
-
-	//set all 3 enable pins to low
-	GPIOA->ODR &= ~(GPIO_ODR_OD1 | GPIO_ODR_OD4);
-	GPIOD->ODR &= ~GPIO_ODR_OD10;
-
-	//set all 3 dir pins
-	GPIOA->ODR &= ~(GPIO_ODR_OD2 | GPIO_ODR_OD5);
-	GPIOD->ODR &= ~GPIO_ODR_OD11;
-
-	//setup all 3 timers
-
-	RCC->APB1ENR |= RCC_APB1ENR_TIM3EN; //enable the timer4 clock
-	TIM3->CR1 &= ~TIM_CR1_CEN; //disable channel 1.
-	TIM3->PSC = prescaler;   //set prescale
-	TIM3->CCMR1 = (TIM3->CCMR1 & ~(0b111<<4)) | (0b110<<4); //set PWM mode 110
-	TIM3->CCR1 = 10; //set to min rise time
-	TIM3->ARR = init_speed; //set to timing
-	TIM3->CCER |= TIM_CCER_CC1E; //enable output to pin.
-	TIM3->CR1 |= TIM_CR1_ARPE; //buffer ARR
-	TIM3->DIER |= TIM_DIER_UIE; //enable interupt
-	NVIC_EnableIRQ(TIM3_IRQn); // Enable interrupt(NVIC level)
-
-	RCC->APB1ENR |= RCC_APB1ENR_TIM4EN; //enable the timer4 clock
-	TIM4->CR1 &= ~TIM_CR1_CEN; //disable channel 1.
-	TIM4->PSC = prescaler;   //set prescale
-	TIM4->CCMR1 = (TIM4->CCMR1 & ~(0b111<<4)) | (0b110<<4); //set PWM mode 110
-	TIM4->CCR1 = 10; //set to min rise time
-	TIM4->ARR = init_speed; //set to timing
-	TIM4->CCER |= TIM_CCER_CC1E; //enable output to pin.
-	TIM4->CR1 |= TIM_CR1_ARPE; //buffer ARR
-	TIM4->DIER |= TIM_DIER_UIE; //enable interupt
-	NVIC_EnableIRQ(TIM4_IRQn); // Enable interrupt(NVIC level)
+void DMA_Init(void);
 
 
-	RCC->APB1ENR |= RCC_APB1ENR_TIM5EN; //enable the timer4 clock
-	TIM5->CR1 &= ~TIM_CR1_CEN; //disable channel 1.
-	TIM5->PSC = prescaler;   //set prescale
-	TIM5->CCMR1 = (TIM4->CCMR1 & ~(0b111<<4)) | (0b110<<4); //set PWM mode 110
-	TIM5->CCR1 = 10; //set to min rise time
-	TIM5->ARR = init_speed; //set to timing
-	TIM5->CCER |= TIM_CCER_CC1E; //enable output to pin.
-	TIM5->CR1 |= TIM_CR1_ARPE; //buffer ARR
-	TIM5->DIER |= TIM_DIER_UIE; //enable interupt
-	NVIC_EnableIRQ(TIM5_IRQn); // Enable interrupt(NVIC level)
-
-	//initialize variables
-	speed[0] = init_speed;
-	speed[1] = init_speed;
-	speed[2] = init_speed;
-	RPM_zero[0] = 1;
-	RPM_zero[1] = 1;
-	RPM_zero[2] = 1;
-	curret_dir[0] = 1;
-	curret_dir[1] = 1;
-	curret_dir[2] = 1;
-	target_dir[0] =1;
-	target_dir[1] =1;
-	target_dir[2] =1;
-}
-
-void disable_steppers(void){
-	//set all 3 enable pins to low
-	GPIOA->ODR &= ~(GPIO_ODR_OD1 | GPIO_ODR_OD4);
-	GPIOD->ODR &= ~GPIO_ODR_OD10;
-}
-
-void enable_steppers(void){
-	//set all 3 enable pins to high
-	GPIOA->ODR |= GPIO_ODR_OD1 | GPIO_ODR_OD4;
-	GPIOD->ODR |= GPIO_ODR_OD10;
-}
-
-void set_speed(uint8_t motor_num, float RPM){
-
-	//if((RPM<2)&&(RPM>-2))RPM=0;
+void disable_steppers(void);
+void enable_steppers(void);
+void set_speed(uint8_t motor_num, float RPM); //low level control of motor speed
+void move_robot (float x, float y, float w); //kinematic movement of robot
 
 
-	RPM = RPM * -1;
-	if(RPM==0){
-		RPM_zero[motor_num] = 1;
-		target_speed[motor_num] = init_speed;
-	}else{
-		printf("RPM = %d   ", (int32_t)RPM);
-		RPM_zero[motor_num] = 0;
-		if(RPM>0)target_dir[motor_num] = 1;
-		else{
-			target_dir[motor_num] = 0;
-			RPM = RPM *-1;
-		}
-		tick_freq[motor_num] = SPR * RPM / 60;
-		target_speed[motor_num] = freq_counter / tick_freq[motor_num];
 
-		//printf("Target speed = %d\r\n", (uint32_t)target_speed[motor_num]);
-		//if(target_speed[motor_num]>65335)target_speed[motor_num]=65335;
-		if(motor_num==0)TIM3->CR1 |= TIM_CR1_CEN; //enable channel 1 of timer 3.
-		if(motor_num==1)TIM4->CR1 |= TIM_CR1_CEN; //enable channel 1 of timer 4.
-		if(motor_num==2)TIM5->CR1 |= TIM_CR1_CEN; //enable channel 1 of timer 5.
+void odometer_setup(void){
 
-	}
+	//calculate needed odometer variables
+	freq_odometer_counter = freq_source / (prescaler_odometer + 1);  //calculate the odometer freq
+	odometer_constant = wheel_dai * M_PI * SPR * freq_odometer_counter / freq_motor_counter;
 
 }
 
+void TIM2_IRQHandler(void){
 
-void motion_setup(){
-	  //calucate force direction from motors in radians
-	   alpha1 = 240 * M_PI/180;
-	   alpha2 = 120 * M_PI/180;
-	   alpha3 = 0 * M_PI/180;
+	TIM2->SR &= ~TIM_SR_UIF; // clear UIF flag
 
-	   //fill input matrix
-	   a = cos(alpha1);
-	   b = cos(alpha2);
-	   c = cos(alpha3);
-	   d = sin(alpha1);
-	   e = sin(alpha2);
-	   f = sin(alpha3);
-	   g = 1;
-	   h = 1;
-	   i = 1;
+	//get current speed in timer ticks
+	current_motor0_speed = TIM3->ARR;
+	current_motor1_speed = TIM4->ARR;
+	current_motor2_speed = TIM5->ARR;
 
-	   //caluate the determint
-	   det = a * e * i + b * f * g + c * d * h - c * e * g - a * f * h - b * d * i;
-
-	   //calulate the inverse
-	   a2 = (e * i - f * h) / det;
-	   b2 = (h * c - i * b) / det;
-	   c2 = (b * f - c * e) / det;
-	   d2 = (g * f - d * i) / det;
-	   e2 = (a * i - g * c) / det;
-	   f2 = (d * c - a * f) / det;
-	   g2 = (d * h - g * e) / det;
-	   h2 = (g * b - a * h) / det;
-	   i2 = (a * e - d * b) / det;
-}
-
-void move_robot (float x, float y, float w){
-	  set_speed(0, a2 * x + b2 * y + c2 * w);
-	  set_speed(1, d2 * x + e2 * y + f2 * w);
-	  set_speed(2, g2 * x + h2 * y + i2 * w);
-}
+	//calculate average speed
+	average_motor0_speed = (current_motor0_speed + last_motor0_speed) / 2;
+	average_motor0_speed = (current_motor0_speed + last_motor0_speed) / 2;
+	average_motor0_speed = (current_motor0_speed + last_motor0_speed) / 2;
 
 
-void DMA_Init(void){
-	  RCC->AHB1ENR |= RCC_AHB1ENR_DMA1EN;
 
-	  //enable DMA on UART2 receive
-	  USART3->CR3 |= USART_CR3_DMAR;
-	  //enable interrupt on receive
-	  USART3->CR1 |= USART_CR1_RXNEIE;
-
-	  //reset DMA1 stream5
-	  DMA1_Stream1->CR &= ~DMA_SxCR_EN;
-	  while (DMA1_Stream1->CR & DMA_SxCR_EN){
-	  }  //wait for reset to complete
-
-	  //set the UART2_RX register
-	  DMA1_Stream1->PAR = (uint32_t)&(USART3->DR);
-	  //set memory buffer to write to
-	  DMA1_Stream1->M0AR = &content;
-	  //set number of bytes to transfer
-	  DMA1_Stream1->NDTR = 3200;
-	  //set the channel to CH4 (UART2_RX), circlular buffer and incremant
-	  DMA1_Stream1->CR =  DMA_SxCR_CHSEL_2 | DMA_SxCR_CIRC | DMA_SxCR_MINC | DMA_SxCR_TCIE;
-
-	  //enable the DMA
-	  DMA1_Stream1->CR |= DMA_SxCR_EN;
-}
-
-void USART3_IRQHandler(void){
-  DMA_pos++;
-  if (DMA_pos == 3200){
-	  DMA_pos = 0;
-  }
 }
 
 
@@ -236,26 +119,27 @@ int main(void){
   MX_USART1_UART_Init();
   MX_USART3_UART_Init();
 
-  //printf("hardware reset complete\r\n");
+
   NVIC_EnableIRQ(USART3_IRQn);
   DMA_Init();
 
-  stepper_setup();
+  pin_setup();
+  timer_setup();
+  motor_setup();
+  odometer_setup();
   motion_setup();
 
   int x_stick, y_stick, throttle_stick, yaw_stick;
-
 
   printf("Start up\r\n");
 
   enable_steppers();
 
-
-
-
-
-
   while (1){
+
+	  //printf("counter = %d\r\n", odometer_counter);
+	  //HAL_Delay(1000);
+
 
 
 	  current_pos = DMA_pos;
@@ -410,6 +294,193 @@ int main(void){
 
 
   }
+}
+
+
+void pin_setup(void){
+
+	RCC->AHB1ENR |= RCC_AHB1ENR_GPIOAEN | RCC_AHB1ENR_GPIODEN; //enable port A and port D clock
+
+	//setup timer pins
+	GPIOA->MODER |= GPIO_MODER_MODE0_1 | GPIO_MODER_MODE6_1; //setup pin A0 and pin A6 to AF
+	GPIOD->MODER |= GPIO_MODER_MODER12_1; //setup pin D12 to AF mode
+	GPIOA->AFR[0] = (GPIOD->AFR[1] &  ~(0b1111 | (0b1111<<(6*4)))) | 0b0010 | (0b0010<<(6*4)); //set pin A0 and pin A6 to AF timer mode       ;
+	GPIOD->AFR[1] = (GPIOD->AFR[1] & ~(0b1111<<(4*(12-8)))) | 0b0010<<(4*(12-8)); //set pin D12 to AF timer mode
+
+	//setup direction and enable pins
+	GPIOA->MODER |= GPIO_MODER_MODE1_0 | GPIO_MODER_MODE2_0 |  GPIO_MODER_MODE4_0 | GPIO_MODER_MODE5_0;
+	GPIOD->MODER |= GPIO_MODER_MODE10_0 | GPIO_MODER_MODE11_0;
+
+	//set all 3 enable pins to low
+	GPIOA->ODR &= ~(GPIO_ODR_OD1 | GPIO_ODR_OD4);
+	GPIOD->ODR &= ~GPIO_ODR_OD10;
+
+	//set all 3 dir pins
+	GPIOA->ODR &= ~(GPIO_ODR_OD2 | GPIO_ODR_OD5);
+	GPIOD->ODR &= ~GPIO_ODR_OD11;
+}
+
+
+void timer_setup(void){
+
+	//setup all 4 timers
+
+	//enable the 4 clocks
+	RCC->APB1ENR |= RCC_APB1ENR_TIM2EN | RCC_APB1ENR_TIM3EN |RCC_APB1ENR_TIM4EN | RCC_APB1ENR_TIM5EN;
+
+	//timer2 is used for the odometer
+	TIM2->CR1 &= ~TIM_CR1_CEN; //disable channel 1.
+	TIM2->PSC = prescaler_odometer;   //timer_freq = imput_clock / (PSC + 1) so will have timer freq of 10KHz
+	TIM2->CCMR1 = (TIM2->CCMR1 & ~(0b111<<4)) | (0b110<<4); //set PWM mode 110
+	TIM2->ARR = odometer_ARR; //interupt freq = timer_feq / ARR so will have a interupt freq of 1KHz
+	TIM2->DIER |= TIM_DIER_UIE; //enable interupt
+	NVIC_EnableIRQ(TIM2_IRQn); // Enable interrupt(NVIC level)
+
+	//timer 3 is used for motor 0
+	TIM3->CR1 &= ~TIM_CR1_CEN; //disable channel 1.
+	TIM3->PSC = prescaler_motor;   //set prescale
+	TIM3->CCMR1 = (TIM3->CCMR1 & ~(0b111<<4)) | (0b110<<4); //set PWM mode 110
+	TIM3->CCR1 = 10; //set to min rise time
+	TIM3->ARR = init_speed; //set to timing
+	TIM3->CCER |= TIM_CCER_CC1E; //enable output to pin.
+	TIM3->CR1 |= TIM_CR1_ARPE; //buffer ARR
+	TIM3->DIER |= TIM_DIER_UIE; //enable interupt
+	NVIC_EnableIRQ(TIM3_IRQn); // Enable interrupt(NVIC level)
+
+	//timer 4 is used for motor 1
+	TIM4->CR1 &= ~TIM_CR1_CEN; //disable channel 1.
+	TIM4->PSC = prescaler_motor;   //set prescale
+	TIM4->CCMR1 = (TIM4->CCMR1 & ~(0b111<<4)) | (0b110<<4); //set PWM mode 110
+	TIM4->CCR1 = 10; //set to min rise time
+	TIM4->ARR = init_speed; //set to timing
+	TIM4->CCER |= TIM_CCER_CC1E; //enable output to pin.
+	TIM4->CR1 |= TIM_CR1_ARPE; //buffer ARR
+	TIM4->DIER |= TIM_DIER_UIE; //enable interupt
+	NVIC_EnableIRQ(TIM4_IRQn); // Enable interrupt(NVIC level)
+
+	//timer 5 is used for motor 2
+	TIM5->CR1 &= ~TIM_CR1_CEN; //disable channel 1.
+	TIM5->PSC = prescaler_motor;   //set prescale
+	TIM5->CCMR1 = (TIM5->CCMR1 & ~(0b111<<4)) | (0b110<<4); //set PWM mode 110
+	TIM5->CCR1 = 10; //set to min rise time
+	TIM5->ARR = init_speed; //set to timing
+	TIM5->CCER |= TIM_CCER_CC1E; //enable output to pin.
+	TIM5->CR1 |= TIM_CR1_ARPE; //buffer ARR
+	TIM5->DIER |= TIM_DIER_UIE; //enable interupt
+	NVIC_EnableIRQ(TIM5_IRQn); // Enable interrupt(NVIC level)
+}
+
+
+void motor_setup(void){
+
+	//initialize motor variables
+
+	freq_motor_counter = freq_source / (prescaler_motor + 1); //calculate the motor timer freq
+
+	speed[0] = init_speed;
+	speed[1] = init_speed;
+	speed[2] = init_speed;
+
+	RPM_zero[0] = 1;
+	RPM_zero[1] = 1;
+	RPM_zero[2] = 1;
+
+	curret_dir[0] = 1;
+	curret_dir[1] = 1;
+	curret_dir[2] = 1;
+
+	target_dir[0] =1;
+	target_dir[1] =1;
+	target_dir[2] =1;
+}
+
+
+void motion_setup(){
+	  //calucate force direction from motors in radians
+	   alpha1 = 240 * M_PI/180;
+	   alpha2 = 120 * M_PI/180;
+	   alpha3 = 0 * M_PI/180;
+
+	   //fill input matrix
+	   a = cos(alpha1);
+	   b = cos(alpha2);
+	   c = cos(alpha3);
+	   d = sin(alpha1);
+	   e = sin(alpha2);
+	   f = sin(alpha3);
+	   g = 1;
+	   h = 1;
+	   i = 1;
+
+	   //caluate the determint
+	   det = a * e * i + b * f * g + c * d * h - c * e * g - a * f * h - b * d * i;
+
+	   //calulate the inverse
+	   a2 = (e * i - f * h) / det;
+	   b2 = (h * c - i * b) / det;
+	   c2 = (b * f - c * e) / det;
+	   d2 = (g * f - d * i) / det;
+	   e2 = (a * i - g * c) / det;
+	   f2 = (d * c - a * f) / det;
+	   g2 = (d * h - g * e) / det;
+	   h2 = (g * b - a * h) / det;
+	   i2 = (a * e - d * b) / det;
+}
+
+
+void disable_steppers(void){
+
+	//set all 3 enable pins to low
+	GPIOA->ODR &= ~(GPIO_ODR_OD1 | GPIO_ODR_OD4);
+	GPIOD->ODR &= ~GPIO_ODR_OD10;
+
+	//disable the odometer timer
+	TIM2->CR1 &= ~TIM_CR1_CEN; //disable channel 1.
+}
+
+
+void enable_steppers(void){
+
+	//set all 3 enable pins to high
+	GPIOA->ODR |= GPIO_ODR_OD1 | GPIO_ODR_OD4;
+	GPIOD->ODR |= GPIO_ODR_OD10;
+
+	//enable the odometer timer
+	TIM2->CR1 |= TIM_CR1_CEN; //enable channel 1.
+}
+
+
+void set_speed(uint8_t motor_num, float RPM){
+
+	RPM = RPM * -1; //This is used because I have dir pin setup backwards at some point this needs to be fixed :(
+
+	if(RPM==0){
+		RPM_zero[motor_num] = 1;
+		target_speed[motor_num] = init_speed;
+	}else{
+		printf("RPM = %d   ", (int32_t)RPM);
+		RPM_zero[motor_num] = 0;
+		if(RPM>0)target_dir[motor_num] = 1;
+		else{
+			target_dir[motor_num] = 0;
+			RPM = RPM *-1;
+		}
+		tick_freq[motor_num] = SPR * RPM / 60;
+		target_speed[motor_num] = freq_motor_counter / tick_freq[motor_num];
+
+		if(motor_num==0)TIM3->CR1 |= TIM_CR1_CEN; //enable channel 1 of timer 3.
+		if(motor_num==1)TIM4->CR1 |= TIM_CR1_CEN; //enable channel 1 of timer 4.
+		if(motor_num==2)TIM5->CR1 |= TIM_CR1_CEN; //enable channel 1 of timer 5.
+
+	}
+
+}
+
+
+void move_robot (float x, float y, float w){
+	  set_speed(0, a2 * x + b2 * y + c2 * w);
+	  set_speed(1, d2 * x + e2 * y + f2 * w);
+	  set_speed(2, g2 * x + h2 * y + i2 * w);
 }
 
 
@@ -603,6 +674,44 @@ void TIM5_IRQHandler(void){
 	}
 	TIM5->ARR = (uint32_t)speed[2];//update ARR
 }
+
+
+
+
+void DMA_Init(void){
+	  RCC->AHB1ENR |= RCC_AHB1ENR_DMA1EN;
+
+	  //enable DMA on UART2 receive
+	  USART3->CR3 |= USART_CR3_DMAR;
+	  //enable interrupt on receive
+	  USART3->CR1 |= USART_CR1_RXNEIE;
+
+	  //reset DMA1 stream5
+	  DMA1_Stream1->CR &= ~DMA_SxCR_EN;
+	  while (DMA1_Stream1->CR & DMA_SxCR_EN){
+	  }  //wait for reset to complete
+
+	  //set the UART2_RX register
+	  DMA1_Stream1->PAR = (uint32_t)&(USART3->DR);
+	  //set memory buffer to write to
+	  DMA1_Stream1->M0AR = &content;
+	  //set number of bytes to transfer
+	  DMA1_Stream1->NDTR = 3200;
+	  //set the channel to CH4 (UART2_RX), circlular buffer and incremant
+	  DMA1_Stream1->CR =  DMA_SxCR_CHSEL_2 | DMA_SxCR_CIRC | DMA_SxCR_MINC | DMA_SxCR_TCIE;
+
+	  //enable the DMA
+	  DMA1_Stream1->CR |= DMA_SxCR_EN;
+}
+
+void USART3_IRQHandler(void){
+  DMA_pos++;
+  if (DMA_pos == 3200){
+	  DMA_pos = 0;
+  }
+}
+
+
 
 
 
