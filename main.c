@@ -31,6 +31,11 @@ char LSB, MSB;
 #define init_speed 25000 //this sets the acceleration by setting the timing of first step, the smaller the number the faster the acceleration
 #define SPR 3200 //steps per revolution of the stepper motor
 
+uint32_t  *motor_en[3]; //pointer used to enable/disable motor timers
+uint32_t  *motor_ARR[3]; //pointer used to update ARR for motor timers
+uint32_t  *motor_ODR[3]; //pointer used to switch dir pin
+uint32_t dir_pin[3]; //dir pin number to write to the ODR
+
 uint32_t freq_motor_counter; //the freq of the timer calculated from freq_source and prescaler
 
 float tick_freq[3]; //the freq that the steps need to be calculated from frq_counter RPM and SPR
@@ -297,6 +302,9 @@ int main(void){
 }
 
 
+
+
+
 void pin_setup(void){
 
 	RCC->AHB1ENR |= RCC_AHB1ENR_GPIOAEN | RCC_AHB1ENR_GPIODEN; //enable port A and port D clock
@@ -376,6 +384,22 @@ void motor_setup(void){
 	//initialize motor variables
 
 	freq_motor_counter = freq_source / (prescaler_motor + 1); //calculate the motor timer freq
+
+	motor_en[0] = &TIM3->CR1;
+	motor_en[1] = &TIM4->CR1;
+	motor_en[2] = &TIM5->CR1;
+
+	motor_ARR[0] = &TIM3->ARR;
+	motor_ARR[1] = &TIM4->ARR;
+	motor_ARR[2] = &TIM5->ARR;
+
+	motor_ODR[0] = &GPIOA->ODR;
+	motor_ODR[1] = &GPIOD->ODR;
+	motor_ODR[2] = &GPIOA->ODR;
+
+	dir_pin[0] = GPIO_ODR_OD5;
+	dir_pin[1] = GPIO_ODR_OD11;
+	dir_pin[2] = GPIO_ODR_OD2;
 
 	speed[0] = init_speed;
 	speed[1] = init_speed;
@@ -468,12 +492,8 @@ void set_speed(uint8_t motor_num, float RPM){
 		tick_freq[motor_num] = SPR * RPM / 60;
 		target_speed[motor_num] = freq_motor_counter / tick_freq[motor_num];
 
-		if(motor_num==0)TIM3->CR1 |= TIM_CR1_CEN; //enable channel 1 of timer 3.
-		if(motor_num==1)TIM4->CR1 |= TIM_CR1_CEN; //enable channel 1 of timer 4.
-		if(motor_num==2)TIM5->CR1 |= TIM_CR1_CEN; //enable channel 1 of timer 5.
-
+		*motor_en[motor_num] |= TIM_CR1_CEN; //enable the timer
 	}
-
 }
 
 
@@ -484,196 +504,85 @@ void move_robot (float x, float y, float w){
 }
 
 
+void motor_update(uint8_t motor_num){
+
+	//if the target speed is zero & current speed is slower init speed the disable the channel
+		if (RPM_zero[motor_num] && (speed[motor_num] >= init_speed)){
+			*motor_en[motor_num] &= ~TIM_CR1_CEN;
+			speed[motor_num] = init_speed;
+			n[motor_num]=0;
+		}
+
+		//if the current direction is same as target direction
+		if(target_dir[motor_num] == curret_dir[motor_num]){
+
+			//if target current speed is slower than init speed then set to init and reset n
+			if (speed[motor_num]>=init_speed){
+				speed[motor_num] = init_speed;
+				n[motor_num]=0;
+			}
+
+			//if target speed is slower than init and current speed is slower than init speed then set current to target and reset n
+			if((target_speed[motor_num] >= init_speed) && (speed[motor_num] >= init_speed)){
+				speed[motor_num] = target_speed[motor_num];
+				n[motor_num]=0;
+
+				//if current speed is slower than target then speed up else slow down
+			}else if(speed[motor_num]>target_speed[motor_num]){
+						n[motor_num]++;
+						speed[motor_num] = speed[motor_num] - ( (2 * speed[motor_num]) / (4 * n[motor_num] + 1) );
+			  	  }else if(n[motor_num]>0){
+			  		  speed[motor_num] = (speed[motor_num] * (4 * n[motor_num] + 1) / (4 * n[motor_num] - 1));
+			  		  n[motor_num]--;
+			  	  }
+
+		//else the current direction is not same as target direction
+		}else{
+
+			//if the current speed is slower than init speed then flip the direction pin and reset
+			if(speed[motor_num] > init_speed - 100){
+				if(target_dir[motor_num])*motor_ODR[motor_num] &= ~dir_pin[motor_num]; //set direction pin
+				else *motor_ODR[motor_num] |= dir_pin[motor_num]; //set direction pin
+				curret_dir[motor_num] = target_dir[motor_num];
+				speed[motor_num] = init_speed;
+				n[motor_num] = 0;
+
+			//else slow down
+			}else if(n[motor_num]>0){
+				speed[motor_num] = (speed[motor_num] * (4 * n[motor_num] + 1) / (4 * n[motor_num] - 1));
+				n[motor_num]--;
+			}
+		}
+
+		if(speed[motor_num]<11)speed[motor_num]=11;
+		if(speed[motor_num]>65535){
+			*motor_en[motor_num] &= ~TIM_CR1_CEN;
+			speed[motor_num] = init_speed;
+			n[motor_num]=0;
+		}
+
+		*motor_ARR[motor_num] = (uint32_t)speed[motor_num];//update ARR
+}
+
 
 void TIM3_IRQHandler(void){
 
 	TIM3->SR &= ~TIM_SR_UIF; // clear UIF flag
-
-	//if the target speed is zero & current speed is slower init speed the disable the channel
-	if (RPM_zero[0] && (speed[0] >= init_speed)){
-		TIM3->CR1 &= ~TIM_CR1_CEN;
-		speed[0] = init_speed;
-		n[0]=0;
+	motor_update(0);
 	}
-
-	//if the current direction is same as target direction
-	if(target_dir[0] == curret_dir[0]){
-
-		//if target current speed is slower than init speed then set to init and reset n
-		if (speed[0]>=init_speed){
-			speed[0] = init_speed;
-			n[0]=0;
-		}
-
-		//if target speed is slower than init and current speed is slower than init speed then set current to target and reset n
-		if((target_speed[0] >= init_speed) && (speed[0] >= init_speed)){
-			speed[0] = target_speed[0];
-			n[0]=0;
-
-			//if current speed is slower than target then speed up else slow down
-		}else if(speed[0]>target_speed[0]){
-					n[0]++;
-					speed[0] = speed[0] - ( (2 * speed[0]) / (4 * n[0] + 1) );
-		  	  }else if(n[0]>0){
-		  		  speed[0] = (speed[0] * (4 * n[0] + 1) / (4 * n[0] - 1));
-		  		  n[0]--;
-		  	  }
-
-	//else the current direction is not same as target direction
-	}else{
-
-		//if the current speed is slower than init speed then flip the direction pin and reset
-		if(speed[0] > init_speed - 100){
-			if(target_dir[0])GPIOA->ODR &= ~GPIO_ODR_OD5; //set direction pin
-			else GPIOA->ODR |= GPIO_ODR_OD5; //set direction pin
-			curret_dir[0] = target_dir[0];
-			speed[0] = init_speed;
-			n[0] = 0;
-
-		//else slow down
-		}else if(n[0]>0){
-			speed[0] = (speed[0] * (4 * n[0] + 1) / (4 * n[0] - 1));
-			n[0]--;
-		}
-	}
-
-	if(speed[0]<11)speed[0]=11;
-	if(speed[0]>65535){
-		TIM5->CR1 &= ~TIM_CR1_CEN;
-		speed[0] = init_speed;
-		n[0]=0;
-	}
-
-	TIM3->ARR = (uint32_t)speed[0];//update ARR
-}
-
-
 
 void TIM4_IRQHandler(void){
 
 	TIM4->SR &= ~TIM_SR_UIF; // clear UIF flag
-
-	//if the target speed is zero & current speed is slower init speed the disable the channel
-	if (RPM_zero[1] && (speed[1] >= init_speed - 1000)){
-		TIM4->CR1 &= ~TIM_CR1_CEN;
-		speed[1] = init_speed;
-		n[1]=0;
-	}
-
-	//if the current direction is same as target direction
-	if(target_dir[1] == curret_dir[1]){
-
-		//if target current speed is slower than init speed then set to init and reset n
-		if (speed[1]>=init_speed){
-			speed[1] = init_speed;
-			n[1]=0;
-		}
-
-		//if target speed is slower than init and current speed is slower than init speed then set current to target and reset n
-		if((target_speed[1] >= init_speed) && (speed[1] >= init_speed)){
-			speed[1] = target_speed[1];
-			n[1]=0;
-
-			//if current speed is slower than target then speed up else slow down
-		}else if(speed[1]>target_speed[1]){
-					n[1]++;
-					speed[1] = speed[1] - ( (2 * speed[1]) / (4 * n[1] + 1) );
-		  	  }else if(n[1]>0){
-		  		  	  speed[1] = (speed[1] * (4 * n[1] + 1) / (4 * n[1] - 1));
-		  		  	  n[1]--;
-		  	  }
-
-	//else the current direction is not same as target direction
-	}else{
-
-		//if the current speed is slower than init speed then flip the direction pin and reset
-		if(speed[1] > init_speed - 100){
-			if(target_dir[1])GPIOD->ODR &= ~GPIO_ODR_OD11; //set direction pin
-			else GPIOD->ODR |= GPIO_ODR_OD11; //set direction pin
-			curret_dir[1] = target_dir[1];
-			speed[1] = init_speed;
-			n[1] = 0;
-
-		//else slow down
-		}else if(n[1]>0){
-			speed[1] = (speed[1] * (4 * n[1] + 1) / (4 * n[1] - 1));
-			n[1]--;
-		}
-	}
-
-	if(speed[1]<12)speed[1]=12;
-	if(speed[1]>65535){
-		TIM4->CR1 &= ~TIM_CR1_CEN;
-		speed[1] = init_speed;
-		n[1]=0;
-	}
-
-	TIM4->ARR = (uint32_t)speed[1];//update ARR
-
+	motor_update(1);
 }
-
 
 void TIM5_IRQHandler(void){
 
 	TIM5->SR &= ~TIM_SR_UIF; // clear UIF flag
-
-	//if the target speed is zero & current speed is slower init speed the disable the channel
-	if (RPM_zero[2] && (speed[2] >= init_speed)){
-		TIM5->CR1 &= ~TIM_CR1_CEN;
-		speed[2] = init_speed;
-		n[2]=0;
-	}
-
-
-	//if the current direction is same as target direction
-	if(target_dir[2] == curret_dir[2]){
-
-		//if target current speed is slower than init speed then set to init and reset n
-		if (speed[2]>=init_speed){
-			speed[2] = init_speed;
-			n[2]=0;
-		}
-
-		//if target speed is slower than init and current speed is slower than init speed then set current to target and reset n
-		if((target_speed[2] >= init_speed) && (speed[2] >= init_speed)){
-			speed[2] = target_speed[2];
-			n[2]=0;
-
-			//if current speed is slower than target then speed up else slow down
-		}else if(speed[2]>target_speed[2]){
-					n[2]++;
-					speed[2] = speed[2] - ( (2 * speed[2]) / (4 * n[2] + 1) );
-		  	  }else if(n[2]>0){
-		  		  speed[2] = (speed[2] * (4 * n[2] + 1) / (4 * n[2] - 1));
-		  		  n[2]--;
-		  	  }
-
-	//else the current direction is not same as target direction
-	}else{
-
-		//if the current speed is slower than init speed then flip the direction pin and reset
-		if(speed[2] > init_speed-100){
-			if(target_dir[2])GPIOA->ODR &= ~GPIO_ODR_OD2; //set direction pin
-			else GPIOA->ODR |= GPIO_ODR_OD2; //set direction pin
-			curret_dir[2] = target_dir[2];
-			speed[2] = init_speed;
-			n[2] = 0;
-
-		//else slow down
-		}else if(n[2]>0){
-			speed[2] = (speed[2] * (4 * n[2] + 1) / (4 * n[2] - 1));
-			n[2]--;
-		}
-	}
-
-	if(speed[2]<11)speed[2]=11;
-	if(speed[2]>65535){
-		TIM5->CR1 &= ~TIM_CR1_CEN;
-		speed[2] = init_speed;
-		n[2]=0;
-	}
-	TIM5->ARR = (uint32_t)speed[2];//update ARR
+	motor_update(2);
 }
+
 
 
 
