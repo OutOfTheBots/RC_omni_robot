@@ -46,7 +46,11 @@ int32_t n[3];
 int8_t curret_dir[3] = {1, 1, 1};
 int8_t target_dir[3] = {1, 1, 1};
 int8_t RPM_zero[3];
+int8_t stepper_enable;
 //------------------------------------------------------------------------------------------
+
+
+
 
 
 //--------------------------------------------------------------------------------
@@ -60,7 +64,6 @@ float det, a2, b2, c2, d2, e2,f2, g2, h2, i2;// the inverse matrix
 
 void pin_setup(void);
 void timer_setup(void);
-void motor_setup(void);
 void motion_setup();
 
 void DMA_Init(void);
@@ -105,7 +108,6 @@ int main(void){
 
   pin_setup();
   timer_setup();
-  motor_setup();
   motion_setup();
 
   int x_stick, y_stick, throttle_stick, yaw_stick, ch_5, ch_6;
@@ -113,13 +115,10 @@ int main(void){
 
   printf("Start up\r\n");
 
-  enable_steppers();
 
   while (1){
 
 
-	  //print_float(x_pos);
-	  //printf("%d\r\n", motor_pos[2]);
 
 
 	  current_pos = DMA_pos;
@@ -289,9 +288,6 @@ int main(void){
 		  //combine bytes then translate and translate
 		  ch_5 = (LSB | (MSB << 8));
 
-
-
-
 		  //wait for next byte to be avaiable
 		  while(current_pos==DMA_pos){
 			   HAL_Delay(1);
@@ -319,16 +315,13 @@ int main(void){
 		  //combine bytes then translate and translate
 		  ch_6 = (LSB | (MSB << 8));
 
-
-
-
 		  if(ch_5==1000)disable_steppers();
 		  else enable_steppers();
 
 		  move_robot(x_stick * 0.7, y_stick * 0.7, yaw_stick * -0.7 );
 		  //set_speed(2,yaw_stick/10);
 
-		  //printf("%d  %d  %d\r\n", yaw_stick, ch_5, ch_6);
+		  printf("%d  %d  %d\r\n", yaw_stick, x_stick, y_stick);
 
 	  }
 
@@ -368,9 +361,10 @@ void pin_setup(void){
 
 void timer_setup(void){
 
-	//setup all 4 timers
 
-	//enable the 4 clocks
+	freq_motor_counter = freq_source / (prescaler_motor + 1); //calculate the motor timer freq
+
+	//enable the 3 clocks
 	RCC->APB1ENR |= RCC_APB1ENR_TIM3EN |RCC_APB1ENR_TIM4EN | RCC_APB1ENR_TIM5EN;
 
 	//timer 3 is used for motor 0
@@ -411,21 +405,6 @@ void timer_setup(void){
 }
 
 
-void motor_setup(void){
-
-	//initialize motor variables
-
-	freq_motor_counter = freq_source / (prescaler_motor + 1); //calculate the motor timer freq
-
-
-
-
-
-
-
-}
-
-
 void motion_setup(){
 	  //calucate force direction from motors in radians
 	   alpha1 = 240 * M_PI/180;
@@ -461,12 +440,25 @@ void motion_setup(){
 
 void disable_steppers(void){
 
+	//disable all 3 timers
+	*motor_en[0] &= ~TIM_CR1_CEN;
+	*motor_en[1] &= ~TIM_CR1_CEN;
+	*motor_en[2] &= ~TIM_CR1_CEN;
+
+	//reset all 3 timers
+	speed[0] = init_speed;
+	speed[1] = init_speed;
+	speed[2] = init_speed;
+	n[0] = 0;
+	n[1] = 0;
+	n[2] = 0;
+
 	//set all 3 enable pins to low
 	GPIOA->ODR &= ~(GPIO_ODR_OD1 | GPIO_ODR_OD4);
 	GPIOD->ODR &= ~GPIO_ODR_OD10;
 
-	//disable the odometer timer
-	TIM2->CR1 &= ~TIM_CR1_CEN; //disable channel 1.
+	//set the enable flag
+	stepper_enable = 0;
 }
 
 
@@ -476,12 +468,14 @@ void enable_steppers(void){
 	GPIOA->ODR |= GPIO_ODR_OD1 | GPIO_ODR_OD4;
 	GPIOD->ODR |= GPIO_ODR_OD10;
 
-	//enable the odometer timer
-	TIM2->CR1 |= TIM_CR1_CEN; //enable channel 1.
+	//set the enable flag
+	stepper_enable = 1;
 }
 
 
 void set_speed(uint8_t motor_num, float RPM){
+
+	if(stepper_enable==0)return;
 
 	RPM = RPM * -1; //This is used because I have dir pin setup backwards at some point this needs to be fixed :(
 
@@ -513,7 +507,7 @@ void move_robot (float x, float y, float w){
 void motor_update(uint8_t motor_num){
 
 	//if the target speed is zero & current speed is slower init speed the disable the channel
-		if (RPM_zero[motor_num] && (speed[motor_num] >= init_speed)){
+		if (RPM_zero[motor_num] && (speed[motor_num] >= init_speed-100)){
 			*motor_en[motor_num] &= ~TIM_CR1_CEN;
 			speed[motor_num] = init_speed;
 			n[motor_num]=0;
@@ -529,7 +523,7 @@ void motor_update(uint8_t motor_num){
 			}
 
 			//if target speed is slower than init and current speed is slower than init speed then set current to target and reset n
-			if((target_speed[motor_num] >= init_speed) && (speed[motor_num] >= init_speed)){
+			if((target_speed[motor_num] >= init_speed) && (speed[motor_num] >= init_speed - 100)){
 				speed[motor_num] = target_speed[motor_num];
 				n[motor_num]=0;
 
@@ -575,14 +569,17 @@ void TIM3_IRQHandler(void){
 
 	TIM3->SR &= ~TIM_SR_UIF; // clear UIF flag
 
-	motor_update(0);
-	}
+	motor_update(0); //This fuction calculates the next needed value for the ARR and switches the dir pin if needed
+}
+
 
 void TIM4_IRQHandler(void){
 
 	TIM4->SR &= ~TIM_SR_UIF; // clear UIF flag
-	motor_update(1);
+
+	motor_update(1); //This fuction calculates the next needed value for the ARR and switches the dir pin if needed
 }
+
 
 void TIM5_IRQHandler(void){
 
