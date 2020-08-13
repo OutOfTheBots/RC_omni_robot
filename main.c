@@ -84,25 +84,7 @@ void disable_steppers(void);
 void enable_steppers(void);
 void set_speed(uint8_t motor_num, float RPM); //low level control of motor speed
 void move_robot (float x, float y, float w); //kinematic movement of robot
-
-
-void kinematics_setup(void){
-
-	robot_arc = robot_dia * 2;  //all trig functions are in radians
-
-	delta_theda = wheel_circumference /  (200 * (robot_arc + robot_dia));
-
-	delta_distance = robot_arc * sin(delta_theda);
-
-	//calculate the offsets in radians
-	motor_x_offsets[0] = M_PI * 4 / 3; //240 degrees
-	motor_x_offsets[1] = M_PI * 2 / 3;  //120 degrees
-	motor_x_offsets[2] = 0; //0 degrees
-
-	motor_y_offsets[0] = M_PI * 5 / 6;  //150 degrees
-	motor_y_offsets[1] = M_PI / 6;  //30 degrees
-	motor_y_offsets[2] = M_PI / -2;  //-90 degrees
-}
+void kinematics_setup(void);
 
 
 void print_float(float float_value){
@@ -117,6 +99,90 @@ void print_float(float float_value){
 
 	printf ("%s%d.%04d", tmpSign, tmpInt1, tmpInt2);
 }
+
+int x_stick, y_stick, throttle_stick, yaw_stick, ch_5, ch_6;
+
+void goto_position (double x_finish, double y_finish, double w_finish){
+
+	float x_speed, y_speed, w_speed;
+
+	while((robot_position[2] > 0.05) | (robot_position[2] < -0.05)){
+		if(robot_position[2]>0)move_robot(0 , 0,  60);
+		else move_robot(0 , 0,  -60);
+		HAL_Delay(10);
+
+		  printf("first  w= ");
+		  print_float(robot_position[2]);
+		  printf("  x= ");
+		  print_float(robot_position[0]);
+		  printf("  y= ");
+		  print_float(robot_position[1]);
+		  printf("  yaw_st = %d  x_st = %d  y_st = %d   ch_6 = %d\r\n", yaw_stick, x_stick, y_stick, ch_6);
+	}
+	move_robot(0 , 0,  0);
+
+
+	float delta_x = x_finish - robot_position[0];
+	float delta_y = y_finish - robot_position[1];
+	float distance_2_finish_squared = delta_x * delta_x + delta_y * delta_y;
+	float angle_2_finish = tan(delta_x / delta_y);
+
+
+	while (distance_2_finish_squared > 100){
+
+		delta_x = x_finish - robot_position[0];
+		delta_y = y_finish - robot_position[1];
+		distance_2_finish_squared = delta_x * delta_x + delta_y * delta_y;
+
+		if(delta_x > 0){
+			if (delta_x > 30)x_speed = 50;
+			else x_speed = 20;
+		}else if(delta_x < -30)x_speed = -50;
+				else x_speed = -20;
+
+		if(delta_y > 0){
+			if (delta_y > 30)y_speed = 50;
+			else y_speed = 20;
+		}else if(delta_y < -30)y_speed = -50;
+				else y_speed = -20;
+
+		move_robot(x_speed , y_speed,  0);
+
+		HAL_Delay(10);
+
+		  printf("second  w= ");
+		  print_float(robot_position[2]);
+		  printf("  x= ");
+		  print_float(robot_position[0]);
+		  printf("  y= ");
+		  print_float(robot_position[1]);
+		  printf("  yaw_st = %d  x_st = %d  y_st = %d   ch_6 = %d\r\n", yaw_stick, x_stick, y_stick, ch_6);
+
+	}
+
+	move_robot(0 ,0,  0);
+
+	while((robot_position[2] > 0.01) | (robot_position[2] < -0.01)){
+		if(robot_position[2]>0)move_robot(0 , 0,  20);
+		else move_robot(0 , 0,  -20);
+		//HAL_Delay(10);
+
+		  printf("first  w= ");
+		  print_float(robot_position[2]);
+		  printf("  x= ");
+		  print_float(robot_position[0]);
+		  printf("  y= ");
+		  print_float(robot_position[1]);
+		  printf("  yaw_st = %d  x_st = %d  y_st = %d   ch_6 = %d\r\n", yaw_stick, x_stick, y_stick, ch_6);
+	}
+	move_robot(0 , 0,  0);
+
+
+
+
+}
+
+
 
 
 int main(void){
@@ -138,7 +204,7 @@ int main(void){
   motion_setup();
   kinematics_setup();
 
-  int x_stick, y_stick, throttle_stick, yaw_stick, ch_5, ch_6;
+
 
 
   printf("Start up\r\n");
@@ -153,7 +219,7 @@ int main(void){
 	  print_float(robot_position[0]);
 	  printf("  y= ");
 	  print_float(robot_position[1]);
-	  printf("  yaw_st = %d  x_st = %d  y_st = %d\r\n", yaw_stick, x_stick, y_stick);
+	  printf("  yaw_st = %d  x_st = %d  y_st = %d   ch_6 = %d\r\n", yaw_stick, x_stick, y_stick, ch_6);
 
 
 	  current_pos = DMA_pos;
@@ -358,6 +424,8 @@ int main(void){
 
 		  //printf("%d  %d  %d\r\n", yaw_stick, x_stick, y_stick);
 
+		  if(ch_6==2000)goto_position(0,0,0);
+
 	  }
 
 
@@ -472,6 +540,25 @@ void motion_setup(){
 	   i2 = (a * e - d * b) / det;
 }
 
+void kinematics_setup(void){
+
+	robot_arc = robot_dia * 2;  //all trig functions are in radians
+
+	delta_theda = wheel_circumference /  (200 * (robot_arc + robot_dia));
+
+	delta_distance = robot_arc * sin(delta_theda);
+
+	//calculate the offsets in radians
+	motor_x_offsets[0] = M_PI * 4 / 3; //240 degrees
+	motor_x_offsets[1] = M_PI * 2 / 3;  //120 degrees
+	motor_x_offsets[2] = 0; //0 degrees
+
+	motor_y_offsets[0] = M_PI * 5 / 6;  //150 degrees
+	motor_y_offsets[1] = M_PI / 6;  //30 degrees
+	motor_y_offsets[2] = M_PI / -2;  //-90 degrees
+}
+
+
 
 void disable_steppers(void){
 
@@ -550,8 +637,8 @@ void motor_update(uint8_t motor_num){
 
 			divider_counter[motor_num] = 0;
 
-			robot_position[0] -= delta_distance * cos(robot_position[2] + motor_x_offsets[motor_num]);
-			robot_position[1] -= delta_distance * cos(robot_position[2] + motor_y_offsets[motor_num]);
+			robot_position[0] -= delta_distance * cos( motor_x_offsets[motor_num] - robot_position[2] );
+			robot_position[1] -= delta_distance * cos( motor_y_offsets[motor_num] - robot_position[2] );
 			robot_position[2] += delta_theda;
 
 			if(robot_position[2] > M_PI) robot_position[2] -= M_PI * 2;
@@ -562,8 +649,8 @@ void motor_update(uint8_t motor_num){
 
 			divider_counter[motor_num] = SPR_divider;
 
-			robot_position[0] += delta_distance * cos(robot_position[2] + motor_x_offsets[motor_num]);
-			robot_position[1] += delta_distance * cos(robot_position[2] + motor_y_offsets[motor_num]);
+			robot_position[0] += delta_distance * cos( motor_x_offsets[motor_num] - robot_position[2] );
+			robot_position[1] += delta_distance * cos( motor_y_offsets[motor_num] - robot_position[2] );
 			robot_position[2] -= delta_theda;
 
 			if(robot_position[2] < (M_PI * -1)) robot_position[2] += M_PI * 2;
